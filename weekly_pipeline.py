@@ -197,11 +197,55 @@ def step_pm_detection():
         step_name="PM Detection",
     )
 
-    # Read detection results
+    # Read initial detection results
     pm_results = read_csv(PM_RESULTS_NEW_CSV)
-    log(f"PM detection completed for {len(pm_results)} domains.")
+    unknowns = sum(1 for r in pm_results if r.get("portal_system") == "unknown")
+    log(f"PM detection completed for {len(pm_results)} domains ({unknowns} unknown).")
 
-    # Also append new results to the cumulative pm_results.csv
+    # Step 3.5: DNS recovery for unknowns (strategies 2=CNAME, 6=SPF/MX/TXT)
+    if unknowns > 0:
+        log("-" * 40)
+        log(f"STEP 3.5: DNS recovery for {unknowns} unknown domains")
+        log("-" * 40)
+        pm_db = os.path.join(PM_DETECTION_DIR, "pm_system_results.db")
+        recovery_db = os.path.join(PM_DETECTION_DIR, "pm_recovery_results.db")
+
+        run_step(
+            [sys.executable, "pm_unknown_recovery.py",
+             "run", "--strategies", "2,6",
+             "--main-db", "pm_system_results.db",
+             "--db", "pm_recovery_results.db"],
+            cwd=PM_DETECTION_DIR,
+            timeout=DETECTION_TIMEOUT,
+            step_name="DNS Recovery",
+        )
+
+        # Consolidate recoveries back into main DB
+        run_step(
+            [sys.executable, "pm_unknown_recovery.py",
+             "consolidate",
+             "--main-db", "pm_system_results.db",
+             "--db", "pm_recovery_results.db"],
+            cwd=PM_DETECTION_DIR,
+            timeout=60,
+            step_name="Consolidate Recovery",
+        )
+
+        # Re-export to pick up recovered domains
+        run_step(
+            [sys.executable, "pm_system_detector.py",
+             "export", PM_RESULTS_NEW_CSV,
+             "--db", "pm_system_results.db"],
+            cwd=PM_DETECTION_DIR,
+            timeout=60,
+            step_name="Re-export PM Results",
+        )
+        pm_results = read_csv(PM_RESULTS_NEW_CSV)
+        new_unknowns = sum(1 for r in pm_results if r.get("portal_system") == "unknown")
+        recovered = unknowns - new_unknowns
+        log(f"DNS recovery recovered {recovered} domains ({new_unknowns} still unknown).")
+
+    # Append new results to the cumulative pm_results.csv
     if pm_results and os.path.exists(PM_RESULTS_CSV):
         pm_fieldnames = list(pm_results[0].keys())
         with open(PM_RESULTS_CSV, "a", encoding="utf-8", newline="") as f:
